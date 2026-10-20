@@ -1,0 +1,84 @@
+name: Build ARENA PULSE 3D APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Locate project (supports uploading arena_pulse_3d.zip directly)
+        shell: bash
+        run: |
+          if [ -f arena_pulse_3d.zip ]; then
+            echo "Found arena_pulse_3d.zip - extracting..."
+            mkdir -p _src && unzip -q -o arena_pulse_3d.zip -d _src || { echo "::error::Failed to unzip arena_pulse_3d.zip"; exit 1; }
+          fi
+          if [ -f pubspec.yaml ]; then
+            PROJ="."
+          else
+            F=$(find _src -name pubspec.yaml -not -path '*/.*' 2>/dev/null | head -1)
+            [ -n "$F" ] || { echo "::error::pubspec.yaml not found. Upload the project files or arena_pulse_3d.zip to the repo root."; exit 1; }
+            PROJ=$(dirname "$F")
+          fi
+          echo "PROJ=$PROJ" >> "$GITHUB_ENV"
+          echo "Project directory: $PROJ"
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Flutter (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate Android scaffolding (flutter create)
+        shell: bash
+        working-directory: ${{ env.PROJ }}
+        run: |
+          set -e
+          mkdir -p /tmp/keep
+          cp -r lib /tmp/keep/lib
+          cp pubspec.yaml /tmp/keep/pubspec.yaml
+          cp analysis_options.yaml /tmp/keep/analysis_options.yaml
+          flutter create --platforms=android --org com.arenapulse --project-name arena_pulse . \
+            || { echo "::error::flutter create failed"; exit 1; }
+          rm -rf lib test
+          cp -r /tmp/keep/lib lib
+          cp /tmp/keep/pubspec.yaml pubspec.yaml
+          cp /tmp/keep/analysis_options.yaml analysis_options.yaml
+          # app name + minSdk 24 (needed by WebView plugin)
+          sed -i 's/android:label="[^"]*"/android:label="ARENA PULSE 3D"/' android/app/src/main/AndroidManifest.xml
+          sed -i 's/flutter\.minSdkVersion/24/' android/app/build.gradle* || true
+
+      - name: Install dependencies
+        working-directory: ${{ env.PROJ }}
+        run: flutter pub get || { echo "::error::flutter pub get failed - check pubspec.yaml / versions"; exit 1; }
+
+      - name: Check game engine JS syntax
+        working-directory: ${{ env.PROJ }}
+        run: node --check assets/game/game.js || { echo "::error::game.js has a syntax error"; exit 1; }
+
+      - name: Analyze Dart code
+        working-directory: ${{ env.PROJ }}
+        run: flutter analyze --no-fatal-infos || { echo "::error::flutter analyze found errors - see log above"; exit 1; }
+
+      - name: Build release APK
+        working-directory: ${{ env.PROJ }}
+        run: flutter build apk --release || { echo "::error::APK build failed - see log above"; exit 1; }
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ARENA-PULSE-3D-apk
+          path: ${{ env.PROJ }}/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
